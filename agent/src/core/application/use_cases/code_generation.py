@@ -20,9 +20,16 @@ from ...domain.entities import (
     ProgrammingLanguage,
     DocumentationReference
 )
+from ...domain.result import Result, Success, Failure, ResultHelper
+from ...domain.errors import DomainError, ValidationError, ErrorCode
+from ...domain.events import (
+    TaskCreatedEvent, TaskStatusChangedEvent, CodeGeneratedEvent,
+    QualityAssessedEvent, TaskCompletedEvent, TaskFailedEvent, get_event_bus
+)
 from ..ports.mcp_client import MCPClientPort
 from ..ports.llm_gateway import LLMGatewayPort
 from ..ports.vector_store import VectorStorePort
+from ..ports.unit_of_work import UnitOfWorkFactory
 from ..services.orchestration import OrchestrationService
 
 logger = logging.getLogger(__name__)
@@ -63,12 +70,14 @@ class CodeGenerationUseCase:
             mcp_client: MCPClientPort,
             llm_gateway: LLMGatewayPort,
             vector_store: VectorStorePort,
-            orchestration_service: OrchestrationService
+            orchestration_service: OrchestrationService,
+            uow_factory: Optional[UnitOfWorkFactory] = None
     ):
         self.mcp_client = mcp_client
         self.llm_gateway = llm_gateway
         self.vector_store = vector_store
         self.orchestration_service = orchestration_service
+        self.uow_factory = uow_factory
         self.max_iterations = 3
 
         # Statistics
@@ -93,8 +102,14 @@ class CodeGenerationUseCase:
 
         start_time = datetime.now()
         self.metrics["total_executions"] += 1
+        event_bus = get_event_bus()
 
         try:
+            # Validate request
+            validation_result = self._validate_request(request)
+            if isinstance(validation_result, Failure):
+                raise ValueError(f"Validation failed: {validation_result.error.message}")
+
             # 1. Create task entity
             task = ProgrammingTask(
                 title=request.title,
@@ -103,7 +118,21 @@ class CodeGenerationUseCase:
                 language=request.language,
                 framework=request.framework
             )
+            
+            # Publish task created event
+            await event_bus.publish(TaskCreatedEvent(
+                task_id=task.task_id,
+                title=task.title,
+                language=task.language.value,
+                requirements=task.requirements
+            ))
+            
             task.update_status(TaskStatus.ANALYZING)
+            await event_bus.publish(TaskStatusChangedEvent(
+                task_id=task.task_id,
+                old_status=TaskStatus.PENDING.value,
+                new_status=TaskStatus.ANALYZING.value
+            ))
 
             # 2. Analyze task
             analysis = await self._analyze_task(request)
@@ -114,32 +143,81 @@ class CodeGenerationUseCase:
             task.documentation = documentation
 
             # 4. Design architecture
+            old_status = task.status
             task.update_status(TaskStatus.DESIGNING)
+            await event_bus.publish(TaskStatusChangedEvent(
+                task_id=task.task_id,
+                old_status=old_status.value,
+                new_status=TaskStatus.DESIGNING.value
+            ))
             architecture = await self._design_architecture(request, documentation)
             task.architecture = architecture
 
             # 5. Generate code iteratively
+            old_status = task.status
             task.update_status(TaskStatus.IMPLEMENTING)
+            await event_bus.publish(TaskStatusChangedEvent(
+                task_id=task.task_id,
+                old_status=old_status.value,
+                new_status=TaskStatus.IMPLEMENTING.value
+            ))
             generated_code = await self._generate_code_iteratively(
                 request, architecture, documentation
             )
 
             for snippet in generated_code:
                 task.add_code_snippet(snippet)
+                # Publish code generated event for each significant component
+                await event_bus.publish(CodeGeneratedEvent(
+                    task_id=task.task_id,
+                    component_name=snippet.framework or "component",
+                    language=snippet.language.value,
+                    lines_of_code=snippet.lines_of_code
+                ))
 
             # 6. Generate tests
+            old_status = task.status
             task.update_status(TaskStatus.TESTING)
+            await event_bus.publish(TaskStatusChangedEvent(
+                task_id=task.task_id,
+                old_status=old_status.value,
+                new_status=TaskStatus.TESTING.value
+            ))
             test_suite = await self._generate_tests(generated_code, request)
             task.tests = test_suite
 
             # 7. Assess quality
+            old_status = task.status
             task.update_status(TaskStatus.REVIEWING)
+            await event_bus.publish(TaskStatusChangedEvent(
+                task_id=task.task_id,
+                old_status=old_status.value,
+                new_status=TaskStatus.REVIEWING.value
+            ))
             quality_metrics = await self._assess_quality(generated_code, test_suite)
             task.assess_quality(quality_metrics)
+            
+            # Publish quality assessed event
+            await event_bus.publish(QualityAssessedEvent(
+                task_id=task.task_id,
+                quality_level=task.quality_level.value if task.quality_level else "unknown",
+                overall_score=quality_metrics.calculate_overall_score(),
+                metrics={
+                    "complexity": quality_metrics.complexity_score,
+                    "test_coverage": quality_metrics.test_coverage,
+                    "maintainability": quality_metrics.maintainability_score
+                }
+            ))
 
             # 8. Optimize if needed
             if task.quality_level.value < request.quality_level.value:
+                old_status = task.status
                 task.update_status(TaskStatus.OPTIMIZING)
+                await event_bus.publish(TaskStatusChangedEvent(
+                    task_id=task.task_id,
+                    old_status=old_status.value,
+                    new_status=TaskStatus.OPTIMIZING.value
+                ))
                 optimized = await self._optimize_to_target_quality(
                     task, request.quality_level
                 )
@@ -152,10 +230,24 @@ class CodeGenerationUseCase:
                 raise Exception("Final validation failed")
 
             # 10. Complete task
+            old_status = task.status
             task.update_status(TaskStatus.COMPLETED)
+            await event_bus.publish(TaskStatusChangedEvent(
+                task_id=task.task_id,
+                old_status=old_status.value,
+                new_status=TaskStatus.COMPLETED.value
+            ))
 
             # Calculate execution metrics
             execution_time = (datetime.now() - start_time).total_seconds()
+            
+            # Publish task completed event
+            await event_bus.publish(TaskCompletedEvent(
+                task_id=task.task_id,
+                execution_time_seconds=execution_time,
+                quality_level=task.quality_level.value if task.quality_level else "unknown",
+                total_lines_of_code=task.total_lines_of_code
+            ))
 
             # Prepare response
             response = CodeGenerationResponse(
@@ -185,9 +277,47 @@ class CodeGenerationUseCase:
 
         except Exception as e:
             logger.error(f"Code generation failed: {e}", exc_info=True)
+            
+            # Publish task failed event
+            task_id = task.task_id if 'task' in locals() else "unknown"
+            phase = task.status.value if 'task' in locals() else "initialization"
+            
+            await event_bus.publish(TaskFailedEvent(
+                task_id=task_id,
+                error_message=str(e),
+                error_code=ErrorCode.INTERNAL_ERROR.value,
+                phase=phase
+            ))
+            
             if 'task' in locals():
                 task.update_status(TaskStatus.FAILED)
             raise
+
+    def _validate_request(self, request: CodeGenerationRequest) -> Result[bool, DomainError]:
+        """Validate code generation request."""
+        # Basic validation
+        if not request.title or not request.title.strip():
+            return Failure(ValidationError(
+                code=ErrorCode.VALIDATION_ERROR,
+                message="Title is required",
+                field="title"
+            ))
+        
+        if not request.description or not request.description.strip():
+            return Failure(ValidationError(
+                code=ErrorCode.VALIDATION_ERROR,
+                message="Description is required",
+                field="description"
+            ))
+        
+        if not request.requirements or len(request.requirements) == 0:
+            return Failure(ValidationError(
+                code=ErrorCode.VALIDATION_ERROR,
+                message="At least one requirement is needed",
+                field="requirements"
+            ))
+        
+        return Success(True)
 
     async def _analyze_task(self, request: CodeGenerationRequest) -> Dict[str, Any]:
         """Analyze task complexity and requirements."""
