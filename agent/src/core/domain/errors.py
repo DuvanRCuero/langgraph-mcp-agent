@@ -39,17 +39,14 @@ class DomainError:
 @dataclass(frozen=True)
 class ValidationError(DomainError):
     """Validation-specific error."""
+    code: ErrorCode = ErrorCode.VALIDATION_ERROR
     field: Optional[str] = None
-    
-    def __post_init__(self):
-        object.__setattr__(self, 'code', ErrorCode.VALIDATION_ERROR)
 
 
 @dataclass(frozen=True)
 class NotFoundError(DomainError):
     """Resource not found error."""
+    code: ErrorCode = ErrorCode.NOT_FOUND
     resource_type: Optional[str] = None
     resource_id: Optional[str] = None
-    
-    def __post_init__(self):
-        object.__setattr__(self, 'code', ErrorCode.NOT_FOUND)
+

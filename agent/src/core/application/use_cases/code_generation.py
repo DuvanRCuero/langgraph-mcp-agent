@@ -103,6 +103,10 @@ class CodeGenerationUseCase:
         start_time = datetime.now()
         self.metrics["total_executions"] += 1
         event_bus = get_event_bus()
+        
+        # Initialize for error handling
+        task_id = "unknown"
+        phase = "initialization"
 
         try:
             # Validate request
@@ -119,6 +123,10 @@ class CodeGenerationUseCase:
                 framework=request.framework
             )
             
+            # Update tracking variables for error handling
+            task_id = task.task_id
+            phase = task.status.value
+            
             # Publish task created event
             await event_bus.publish(TaskCreatedEvent(
                 task_id=task.task_id,
@@ -128,6 +136,7 @@ class CodeGenerationUseCase:
             ))
             
             task.update_status(TaskStatus.ANALYZING)
+            phase = task.status.value
             await event_bus.publish(TaskStatusChangedEvent(
                 task_id=task.task_id,
                 old_status=TaskStatus.PENDING.value,
@@ -145,6 +154,7 @@ class CodeGenerationUseCase:
             # 4. Design architecture
             old_status = task.status
             task.update_status(TaskStatus.DESIGNING)
+            phase = task.status.value
             await event_bus.publish(TaskStatusChangedEvent(
                 task_id=task.task_id,
                 old_status=old_status.value,
@@ -156,6 +166,7 @@ class CodeGenerationUseCase:
             # 5. Generate code iteratively
             old_status = task.status
             task.update_status(TaskStatus.IMPLEMENTING)
+            phase = task.status.value
             await event_bus.publish(TaskStatusChangedEvent(
                 task_id=task.task_id,
                 old_status=old_status.value,
@@ -178,6 +189,7 @@ class CodeGenerationUseCase:
             # 6. Generate tests
             old_status = task.status
             task.update_status(TaskStatus.TESTING)
+            phase = task.status.value
             await event_bus.publish(TaskStatusChangedEvent(
                 task_id=task.task_id,
                 old_status=old_status.value,
@@ -189,6 +201,7 @@ class CodeGenerationUseCase:
             # 7. Assess quality
             old_status = task.status
             task.update_status(TaskStatus.REVIEWING)
+            phase = task.status.value
             await event_bus.publish(TaskStatusChangedEvent(
                 task_id=task.task_id,
                 old_status=old_status.value,
@@ -213,6 +226,7 @@ class CodeGenerationUseCase:
             if task.quality_level.value < request.quality_level.value:
                 old_status = task.status
                 task.update_status(TaskStatus.OPTIMIZING)
+                phase = task.status.value
                 await event_bus.publish(TaskStatusChangedEvent(
                     task_id=task.task_id,
                     old_status=old_status.value,
@@ -232,6 +246,7 @@ class CodeGenerationUseCase:
             # 10. Complete task
             old_status = task.status
             task.update_status(TaskStatus.COMPLETED)
+            phase = task.status.value
             await event_bus.publish(TaskStatusChangedEvent(
                 task_id=task.task_id,
                 old_status=old_status.value,
@@ -278,10 +293,7 @@ class CodeGenerationUseCase:
         except Exception as e:
             logger.error(f"Code generation failed: {e}", exc_info=True)
             
-            # Publish task failed event
-            task_id = task.task_id if 'task' in locals() else "unknown"
-            phase = task.status.value if 'task' in locals() else "initialization"
-            
+            # Publish task failed event with tracked variables
             await event_bus.publish(TaskFailedEvent(
                 task_id=task_id,
                 error_message=str(e),
@@ -289,8 +301,12 @@ class CodeGenerationUseCase:
                 phase=phase
             ))
             
-            if 'task' in locals():
-                task.update_status(TaskStatus.FAILED)
+            # Update task status if it was created
+            if task_id != "unknown":
+                try:
+                    task.update_status(TaskStatus.FAILED)
+                except Exception:
+                    pass  # Task may not exist or status transition may be invalid
             raise
 
     def _validate_request(self, request: CodeGenerationRequest) -> Result[bool, DomainError]:
