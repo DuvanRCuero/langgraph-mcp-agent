@@ -497,4 +497,4 @@ class ProjectContext:
         if not scores:
             return 0.0
 
-        return sum(scores) / len(scores)<
+        return sum(scores) / len(scores)
