@@ -39,6 +39,7 @@ class DomainError:
 @dataclass(frozen=True)
 class ValidationError(DomainError):
     """Validation-specific error."""
+    message: str = ""
     code: ErrorCode = ErrorCode.VALIDATION_ERROR
     field: Optional[str] = None
 
@@ -46,6 +47,7 @@ class ValidationError(DomainError):
 @dataclass(frozen=True)
 class NotFoundError(DomainError):
     """Resource not found error."""
+    message: str = ""
     code: ErrorCode = ErrorCode.NOT_FOUND
     resource_type: Optional[str] = None
     resource_id: Optional[str] = None
