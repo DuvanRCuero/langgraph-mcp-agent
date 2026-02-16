@@ -704,3 +704,212 @@ class TestGenNode(BaseNode):
 
         Provide the complete test file.
         """
+
+
+class ReviewNode(BaseNode):
+    """Reviews generated code for quality and correctness."""
+    
+    def __init__(self, llm_gateway: LLMGatewayPort, agent_tools: AgentTools):
+        super().__init__("review")
+        self.llm_gateway = llm_gateway
+        self.tools = agent_tools
+    
+    async def _execute_impl(self, state: AgentState) -> AgentState:
+        """Review generated code."""
+        
+        reviews = []
+        
+        for code_item in state.get("generated_code", []):
+            # Validate code quality
+            quality_report = self.tools.validate_code_quality(
+                code_item["code"],
+                state["language"]
+            )
+            
+            # Get LLM review
+            review_prompt = self._build_review_prompt(code_item, state)
+            
+            response = await self.llm_gateway.generate(
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "You are a senior code reviewer. Provide constructive feedback."
+                    },
+                    {
+                        "role": "user",
+                        "content": review_prompt
+                    }
+                ],
+                config={
+                    "temperature": 0.3,
+                    "max_tokens": 1500
+                }
+            )
+            
+            reviews.append({
+                "component": code_item["component"],
+                "quality_report": quality_report,
+                "review_comments": response.content,
+                "approved": quality_report["valid"] and len(quality_report["issues"]) == 0
+            })
+        
+        state["code_reviews"] = reviews
+        state["current_phase"] = AgentPhase.TESTING
+        
+        # Add to memory
+        if "memory" in state:
+            state["memory"].append({
+                "type": "review",
+                "reviews_count": len(reviews),
+                "approved_count": sum(1 for r in reviews if r["approved"]),
+                "timestamp": datetime.now().isoformat()
+            })
+        
+        return state
+    
+    def _build_review_prompt(self, code_item: Dict[str, Any], state: AgentState) -> str:
+        """Build code review prompt."""
+        
+        return f"""
+        Review this {state['language']} code for quality and correctness:
+        
+        Component: {code_item['component']}
+        
+        Code:
+        ```{state['language']}
+        {code_item['code']}
+        ```
+        
+        Review criteria:
+        1. Code correctness and functionality
+        2. Best practices adherence
+        3. Error handling
+        4. Performance considerations
+        5. Security concerns
+        6. Maintainability
+        7. Documentation quality
+        
+        Provide specific feedback and improvement suggestions.
+        """
+
+
+class OptimizationNode(BaseNode):
+    """Optimizes code for performance and quality."""
+    
+    def __init__(self, llm_gateway: LLMGatewayPort, agent_tools: AgentTools):
+        super().__init__("optimization")
+        self.llm_gateway = llm_gateway
+        self.tools = agent_tools
+    
+    async def _execute_impl(self, state: AgentState) -> AgentState:
+        """Optimize generated code."""
+        
+        optimized_code = []
+        
+        for code_item in state.get("generated_code", []):
+            # Check if optimization is needed
+            complexity = self.tools.calculate_complexity_score(
+                code_item["code"],
+                state["language"]
+            )
+            
+            if complexity > 50 or state.get("quality_level") == "elite":
+                # Optimize code
+                optimized = await self._optimize_code(code_item, state)
+                optimized_code.append(optimized)
+            else:
+                # No optimization needed
+                optimized_code.append(code_item)
+        
+        state["generated_code"] = optimized_code
+        state["current_phase"] = AgentPhase.COMPLETION
+        
+        # Add to memory
+        if "memory" in state:
+            state["memory"].append({
+                "type": "optimization",
+                "optimized_count": len(optimized_code),
+                "timestamp": datetime.now().isoformat()
+            })
+        
+        return state
+    
+    async def _optimize_code(
+        self,
+        code_item: Dict[str, Any],
+        state: AgentState
+    ) -> Dict[str, Any]:
+        """Optimize a code component."""
+        
+        optimization_prompt = f"""
+        Optimize this {state['language']} code for:
+        - Performance
+        - Memory efficiency
+        - Readability
+        - Best practices
+        
+        Original code:
+        ```{state['language']}
+        {code_item['code']}
+        ```
+        
+        Provide the optimized version maintaining the same functionality.
+        """
+        
+        response = await self.llm_gateway.generate(
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are a performance optimization expert."
+                },
+                {
+                    "role": "user",
+                    "content": optimization_prompt
+                }
+            ],
+            config={
+                "temperature": 0.3,
+                "max_tokens": 3000
+            }
+        )
+        
+        # Update code item
+        optimized_item = code_item.copy()
+        optimized_item["code"] = response.content
+        optimized_item["optimized"] = True
+        
+        return optimized_item
+
+
+class HumanReviewNode(BaseNode):
+    """Placeholder for human review integration."""
+    
+    def __init__(self):
+        super().__init__("human_review")
+    
+    async def _execute_impl(self, state: AgentState) -> AgentState:
+        """
+        Placeholder for human review.
+        
+        In a production system, this would:
+        - Pause execution and wait for human input
+        - Present code for review via UI
+        - Accept feedback and suggestions
+        - Resume with modifications
+        """
+        
+        self.logger.info("Human review node - auto-approved (not implemented)")
+        
+        # For now, just mark as reviewed
+        state["human_reviewed"] = True
+        state["human_approved"] = True
+        
+        # Add to memory
+        if "memory" in state:
+            state["memory"].append({
+                "type": "human_review",
+                "status": "auto_approved",
+                "timestamp": datetime.now().isoformat()
+            })
+        
+        return state
